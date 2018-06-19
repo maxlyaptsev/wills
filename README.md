@@ -1,6 +1,6 @@
 Привет
 
-Дать доступ к целому проекту не могу - безопасность, все дела. Приведу некоторые куски кода с объяснением что зачем. С разбивкой по категориям. 
+Дать доступ к целому проекту не могу - безопасность, все дела. Приведу некоторые куски кода с объяснением.
 
 ## Работа с внешними api
 ### Задача: получить посты по тегам из вконтакте, выдать в формате, удобном для мобильного приложения.
@@ -35,6 +35,157 @@ public static function updateProductsFromCrmAgent($timeFrom)
 	}
 ```
 В аргументе указана определенное время - тянем продукты, которые изменились или добавились начиная с этого времени и позже, а возвращаем текущее время после выполнения операции. В следующий раз будут тянутся продукты начиная с обновленного метода. Если что-то пойдет не так, время останется преждим, и будут новые попытки получить нужную информацию. Параллельно, оповещая кого нужно.
+
+## логирование
+Задача: логи в зависимости от уровня должны уходить в разные источники, дебаги только в файлы, инфо и выше в базу данных, warning и error в чат, на которые необходимо быстро реагировать. Основа - монолог. Сделал обертку и 2 хендлера - под чат mattermost и под базу данных (конкретно в этом случае это highload block). 
+```php
+<?php
+namespace Synergy;
+
+/**
+ * Логирование
+ * Class Logger
+ *
+ * @package Synergy
+ */
+class Logger {
+
+	private $instance = null;
+
+	private function __construct($channel)
+	{
+
+	}
+
+    /**
+     * @param $channel
+     *
+     * @return \Monolog\Loggerer
+     */
+	public static function getInstance($channel) {
+
+		$logger = new \Monolog\Logger($channel);
+
+		$fileStream = new \Monolog\Handler\RotatingFileHandler("/home/bitrix/www/local/monolog/{$channel}/log.html", 500, \Monolog\Logger::DEBUG);
+		$formatter = new \Monolog\Formatter\VisualFormatter();
+		$fileStream->setFormatter($formatter);
+		$logger->pushHandler($fileStream);
+
+		$logger->pushHandler(new \Monolog\Handler\HighLoadBlockHandler(14, \Monolog\Logger::DEBUG, 20000)); // все выводим в hl блоки, вообще все
+		$logger->pushHandler(new \Monolog\Handler\MattermostHandler('https://mm.synergy.ru/hooks/refa5d31jidafx3k7btwspt8ba', \Monolog\Logger::WARNING)); // в чат только ошибки
+
+		$logger->pushProcessor(function ($record) {
+
+			$trace = new \Monolog\Processor\IntrospectionProcessor(\Monolog\Logger::DEBUG); 
+			$record = $trace($record);
+
+
+			$git = new \Monolog\Processor\GitProcessor(\Monolog\Logger::WARNING); // добавляем информацию о гите если выше warning
+			$record = $git($record);
+
+			return $record;
+		});
+
+		return $logger;
+	}
+
+
+
+
+}
+```
+Обертка сделана для удобства, монолог имеет довольно сложную конструкцию. В итоге имеем простую запись:
+```php
+\Synergy\Logger::getInstance('core')->warning('что-то случилось');
+```
+Пример хендлера для mattermost
+```php
+<?php
+namespace Monolog\Handler;
+use GuzzleHttp\Client;
+use Monolog\Logger;
+use Monolog\Handler\AbstractProcessingHandler;
+
+/**
+ * Отправка сообщений в катал mattermost
+ * Class MattermostHandler
+ *
+ * @package Monolog\Handler
+ */
+class MattermostHandler extends AbstractProcessingHandler
+{
+    /**
+     * @var 
+     */
+	private $webHookUrl;
+
+    /**
+     * @var Client 
+     */
+	private $client;
+
+    /**
+     * MattermostHandler constructor.
+     * @param $webHookUrl
+     * @param int $level
+     * @param bool $bubble
+     * @param null $client
+     */
+	public function __construct($webHookUrl, $level = Logger::DEBUG, $bubble = true, $client = null)
+	{
+		parent::__construct($level, $bubble);
+		$this->webHookUrl = $webHookUrl;
+		$this->client = ($client) ?: new Client();
+	}
+
+    /**
+     * Реализация записи логов
+     * @param array $record
+     */
+	public function write(array $record)
+	{
+		$this->client->post($this->webHookUrl, [
+			'body' => [
+				'payload' => json_encode([
+					'attachments' => [
+						[
+							"fallback"=> $record['formatted'],
+							"color"=> $this->getColor($record['level']),
+							'text' => "{$record['level_name']}: {$record['message']}\r\n_{$record['extra']['file']}:{$record['extra']['line']}_"
+						]
+					],
+					'username' => 'Monolog',
+					"icon_url" => "https://my.synergy.ru/upload/icons/fire.jpg"
+				]),
+			]
+		]);
+	}
+
+	/**
+	 * Цвет для сообщений
+	 * @param $level
+	 *
+	 * @return string
+	 */
+	public function getColor($level)
+	{
+
+		switch ($level) {
+			case Logger::ERROR:
+				return '#f00';
+				break;
+			case Logger::WARNING:
+				return '#FF8000';
+				break;
+			default:
+				return '#FF8000';
+				break;
+
+		}
+	}
+}
+```
+
 
 ## работа с yii2 
 SaaS решение. Задача: Пользователь заполняет некие простые формы с моментальным сохранением данных (как в google docs)
